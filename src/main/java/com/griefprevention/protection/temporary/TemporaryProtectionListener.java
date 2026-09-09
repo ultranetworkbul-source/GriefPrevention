@@ -16,6 +16,7 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
 import org.bukkit.event.entity.CreatureSpawnEvent;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
+import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 
 import java.util.UUID;
@@ -52,32 +53,62 @@ public class TemporaryProtectionListener implements Listener {
         }
     }
 
+    /**
+     * Handles every source of damage to a player, not only entity damage.
+     * <p>
+     * {@link EntityDamageByEntityEvent} shares a handler list with
+     * {@link EntityDamageEvent}, so this one method receives both. That is deliberate:
+     * two handlers at the same priority would run in an undefined order, and whichever
+     * cancelled first would suppress the other's message.
+     */
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
-    public void onEntityDamageByEntity(EntityDamageByEntityEvent event) {
+    public void onEntityDamage(EntityDamageEvent event) {
         if (!(event.getEntity() instanceof Player victim)) return;
 
-        Player attacker = getAttacker(event);
-        if (attacker != null) {
-            if (attacker.hasPermission("griefprevention.temporaryprotection.bypass")) {
+        UUID ownerUUID = getProtectedClaimOwner(victim.getLocation());
+        if (ownerUUID == null) return;
+
+        TemporaryProtectionManager manager = TemporaryProtectionManager.getInstance();
+        if (manager == null) return;
+
+        TemporaryProtectionConfig config = TemporaryProtectionConfig.getInstance();
+        boolean pvpActive = manager.hasProtection(ownerUUID, ProtectionType.PVP);
+
+        // Damage dealt by another player, directly or by projectile.
+        if (event instanceof EntityDamageByEntityEvent entityEvent) {
+            Player attacker = getAttacker(entityEvent);
+            if (attacker != null) {
+                if (attacker.hasPermission("griefprevention.temporaryprotection.bypass")) {
+                    return;
+                }
+                if (pvpActive) {
+                    event.setCancelled(true);
+                    if (config != null) {
+                        attacker.sendMessage(config.getMessagePvpDenied());
+                    }
+                }
+                // A player attacker is never treated as mob damage.
                 return;
             }
+        }
 
-            if (shouldDenyPvP(attacker, victim)) {
-                event.setCancelled(true);
-                TemporaryProtectionConfig config = TemporaryProtectionConfig.getInstance();
-                if (config != null) {
-                    attacker.sendMessage(config.getMessagePvpDenied());
-                }
-            }
+        // PVP Protection grants immunity to everything else too, unless the cause is exempt.
+        if (pvpActive
+                && (config == null || config.isPvpFullImmunity())
+                && (config == null || !config.isImmunityExempt(event.getCause()))) {
+            event.setCancelled(true);
             return;
         }
 
-        Entity damager = event.getDamager();
+        // Mob Protection still covers hostile-mob damage on its own.
+        if (!(event instanceof EntityDamageByEntityEvent entityEvent)) return;
+
+        Entity damager = entityEvent.getDamager();
         Entity source = (damager instanceof Projectile projectile && projectile.getShooter() instanceof Entity shooter)
                 ? shooter : damager;
         if (!(source instanceof Enemy)) return;
 
-        if (shouldDenyMobDamage(victim)) {
+        if (manager.hasProtection(ownerUUID, ProtectionType.MOB)) {
             event.setCancelled(true);
         }
     }
@@ -155,35 +186,16 @@ public class TemporaryProtectionListener implements Listener {
         return claim.checkPermission(player, ClaimPermission.Container, null) != null;
     }
 
-    private boolean shouldDenyPvP(Player attacker, Player victim) {
-        Location victimLocation = victim.getLocation();
-        Claim claim = plugin.dataStore.getClaimAt(victimLocation, false, null);
-        if (claim == null) return false;
+    /**
+     * @return the owner of the claim at this location, or null if there is no claim
+     *         or it is an admin claim. Subdivisions resolve to their top-level parent.
+     */
+    private UUID getProtectedClaimOwner(Location location) {
+        Claim claim = plugin.dataStore.getClaimAt(location, false, null);
+        if (claim == null) return null;
 
         Claim topClaim = claim.parent != null ? claim.parent : claim;
-        UUID ownerUUID = topClaim.ownerID;
-
-        if (ownerUUID == null) return false;
-
-        TemporaryProtectionManager manager = TemporaryProtectionManager.getInstance();
-        if (manager == null || !manager.hasProtection(ownerUUID, ProtectionType.PVP)) {
-            return false;
-        }
-
-        // Block PvP for everyone when protection is active (no exceptions for owner or trusted players)
-        return true;
-    }
-
-    private boolean shouldDenyMobDamage(Player victim) {
-        Claim claim = plugin.dataStore.getClaimAt(victim.getLocation(), false, null);
-        if (claim == null) return false;
-
-        Claim topClaim = claim.parent != null ? claim.parent : claim;
-        UUID ownerUUID = topClaim.ownerID;
-        if (ownerUUID == null) return false;
-
-        TemporaryProtectionManager manager = TemporaryProtectionManager.getInstance();
-        return manager != null && manager.hasProtection(ownerUUID, ProtectionType.MOB);
+        return topClaim.ownerID;
     }
 
     private boolean shouldDenyMobSpawn(Location location) {

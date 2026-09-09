@@ -7,18 +7,30 @@ import org.bukkit.Sound;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.event.entity.EntityDamageEvent;
 
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.logging.Level;
 
 public class TemporaryProtectionConfig {
 
-    private static final int CURRENT_CONFIG_VERSION = 2;
+    private static final int CURRENT_CONFIG_VERSION = 3;
+
+    /**
+     * Damage causes that stay lethal even while PVP protection grants full immunity.
+     * VOID and WORLD_BORDER are here because cancelling them leaves a player falling
+     * forever instead of respawning; KILL and SUICIDE are here so staff commands work.
+     */
+    private static final List<String> DEFAULT_IMMUNITY_EXEMPT_CAUSES =
+            List.of("VOID", "WORLD_BORDER", "KILL", "SUICIDE");
 
     private static TemporaryProtectionConfig instance;
 
@@ -29,6 +41,10 @@ public class TemporaryProtectionConfig {
     private double chestMultiplier = 2.0;
     private double pvpMultiplier = 4.0;
     private double mobMultiplier = 3.0;
+
+    private boolean pvpFullImmunity = true;
+    private Set<EntityDamageEvent.DamageCause> pvpImmunityExemptCauses =
+            EnumSet.noneOf(EntityDamageEvent.DamageCause.class);
 
     private final Map<String, DurationOption> durationOptions = new HashMap<>();
 
@@ -174,6 +190,16 @@ public class TemporaryProtectionConfig {
             changed = true;
         }
 
+        // v3: PVP Protection became full damage immunity.
+        if (!config.isSet("protection.pvp.full-immunity")) {
+            config.set("protection.pvp.full-immunity", true);
+            changed = true;
+        }
+        if (!config.isSet("protection.pvp.immunity-exempt-causes")) {
+            config.set("protection.pvp.immunity-exempt-causes", DEFAULT_IMMUNITY_EXEMPT_CAUSES);
+            changed = true;
+        }
+
         config.set("config-version", CURRENT_CONFIG_VERSION);
 
         if (!changed) {
@@ -206,6 +232,14 @@ public class TemporaryProtectionConfig {
             defaultConfig.set("pricing.chest.per-day-multiplier", 2.0);
             defaultConfig.set("pricing.pvp.per-day-multiplier", 4.0);
             defaultConfig.set("pricing.mob.per-day-multiplier", 3.0);
+
+            // true  = PVP Protection makes players inside the claim immune to every damage
+            //         source, not only other players.
+            // false = PVP Protection blocks player-versus-player damage only (the old behaviour).
+            defaultConfig.set("protection.pvp.full-immunity", true);
+            // Damage causes that still apply even with full immunity on. Names come from
+            // Bukkit's EntityDamageEvent.DamageCause. Set to [] for literally no damage at all.
+            defaultConfig.set("protection.pvp.immunity-exempt-causes", DEFAULT_IMMUNITY_EXEMPT_CAUSES);
 
             defaultConfig.set("durations.12h.hours", 12);
             defaultConfig.set("durations.12h.slot", 10);
@@ -255,8 +289,8 @@ public class TemporaryProtectionConfig {
             defaultConfig.set("main-menu.pvp.material", "DIAMOND_SWORD");
             defaultConfig.set("main-menu.pvp.display-name", "&aPVP Protection");
             defaultConfig.set("main-menu.pvp.lore", List.of(
-                    "&7Disables PVP in your claims.",
-                    "&7Protect yourself from attackers!",
+                    "&7Makes players inside your claims",
+                    "&7immune to all damage.",
                     "",
                     "&7Status: {status}",
                     "&7Remaining: &f{remaining}",
@@ -336,6 +370,25 @@ public class TemporaryProtectionConfig {
         chestMultiplier = config.getDouble("pricing.chest.per-day-multiplier", 2.0);
         pvpMultiplier = config.getDouble("pricing.pvp.per-day-multiplier", 4.0);
         mobMultiplier = config.getDouble("pricing.mob.per-day-multiplier", 3.0);
+
+        pvpFullImmunity = config.getBoolean("protection.pvp.full-immunity", true);
+
+        List<String> exemptNames = config.isSet("protection.pvp.immunity-exempt-causes")
+                ? config.getStringList("protection.pvp.immunity-exempt-causes")
+                : DEFAULT_IMMUNITY_EXEMPT_CAUSES;
+        Set<EntityDamageEvent.DamageCause> exemptCauses =
+                EnumSet.noneOf(EntityDamageEvent.DamageCause.class);
+        for (String name : exemptNames) {
+            if (name == null || name.isBlank()) continue;
+            try {
+                exemptCauses.add(EntityDamageEvent.DamageCause
+                        .valueOf(name.trim().toUpperCase(Locale.ROOT)));
+            } catch (IllegalArgumentException e) {
+                plugin.getLogger().warning("[TemporaryProtection] Unknown damage cause '" + name
+                        + "' in protection.pvp.immunity-exempt-causes - ignoring it.");
+            }
+        }
+        pvpImmunityExemptCauses = exemptCauses;
 
         durationOptions.clear();
         ConfigurationSection durationsSection = config.getConfigurationSection("durations");
@@ -474,6 +527,12 @@ public class TemporaryProtectionConfig {
 
     public double getChestMultiplier() { return chestMultiplier; }
     public double getPvpMultiplier() { return pvpMultiplier; }
+
+    public boolean isPvpFullImmunity() { return pvpFullImmunity; }
+
+    public boolean isImmunityExempt(EntityDamageEvent.DamageCause cause) {
+        return cause != null && pvpImmunityExemptCauses.contains(cause);
+    }
     public double getMobMultiplier() { return mobMultiplier; }
     public Map<String, DurationOption> getDurationOptions() { return durationOptions; }
 
